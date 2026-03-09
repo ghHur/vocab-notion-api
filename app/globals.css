@@ -23,6 +23,23 @@
   --tag-text: #d4b878;
 }
 
+[data-theme="light"] {
+  --bg: #f5f0eb;
+  --surface: #ebe5dd;
+  --card: #ffffff;
+  --card-hover: #f8f4ef;
+  --accent: #c4863a;
+  --accent-dim: #a06a28;
+  --text: #2c2416;
+  --text-dim: #5c4f3e;
+  --text-muted: #8c7e6c;
+  --border: #d8cfc4;
+  --danger: #c43030;
+  --success: #3a8a4a;
+  --tag-bg: #f0e8d8;
+  --tag-text: #8a6a30;
+}
+
 html,
 body {
   background: var(--bg);
@@ -654,6 +671,94 @@ body {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
+}
+
+/* Tag Tabs */
+.tag-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.tag-tab {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.tag-tab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tag-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+.tag-tab-count {
+  font-size: 10px;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+
+/* Theme Toggle */
+.theme-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: all 0.15s;
+}
+.theme-toggle:hover {
+  border-color: var(--accent);
+}
+
+/* Fill-in-the-blank */
+.fill-blank-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  padding: 4px 10px;
+  font-size: 16px;
+  font-family: inherit;
+  width: 140px;
+  text-align: center;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.fill-blank-input:focus {
+  border-color: var(--accent);
+}
+.fill-blank-input.correct {
+  border-color: var(--success);
+  color: var(--success);
+}
+.fill-blank-input.wrong {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.fill-sentence {
+  font-size: 16px;
+  color: var(--text-dim);
+  line-height: 2;
+  font-style: italic;
 }
 
 /* Toast */

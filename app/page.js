@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 
 // ─── Utils ───
 const STORAGE_KEY = "vocab-notebook-words";
+const THEME_KEY = "vocab-theme";
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -82,6 +83,20 @@ export default function VocabApp() {
   const [formDifficulty, setFormDifficulty] = useState(0);
   const [tagInput, setTagInput] = useState("");
 
+  // Theme
+  const [theme, setTheme] = useState("dark");
+
+  // Tag tabs
+  const [activeTagTab, setActiveTagTab] = useState("");
+
+  // Fill-in-the-blank quiz state
+  const [fillPool, setFillPool] = useState([]);
+  const [fillCurrent, setFillCurrent] = useState(0);
+  const [fillScore, setFillScore] = useState({ correct: 0, wrong: 0 });
+  const [fillFinished, setFillFinished] = useState(false);
+  const [fillAnswered, setFillAnswered] = useState(false);
+  const [fillUserAnswer, setFillUserAnswer] = useState("");
+
   // Load from localStorage + 자동 동기화
   useEffect(() => {
     try {
@@ -90,6 +105,10 @@ export default function VocabApp() {
     } catch {
       setWords([]);
     }
+    // 테마 복원
+    const savedTheme = localStorage.getItem(THEME_KEY) || "dark";
+    setTheme(savedTheme);
+    document.documentElement.setAttribute("data-theme", savedTheme);
     // Service Worker
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
@@ -107,6 +126,85 @@ export default function VocabApp() {
     setToast({ message: msg, show: true });
     setTimeout(() => setToast((t) => ({ ...t, show: false })), 2000);
   }, []);
+
+  // ─── Theme ───
+  const toggleTheme = useCallback(() => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem(THEME_KEY, next);
+    document.documentElement.setAttribute("data-theme", next);
+  }, [theme]);
+
+  // ─── TTS ───
+  const speak = useCallback((text, e) => {
+    if (e) e.stopPropagation();
+    if (!text || typeof window === "undefined" || !window.speechSynthesis)
+      return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-US";
+    utterance.rate = 0.85;
+    const voices = window.speechSynthesis.getVoices();
+    const enVoice =
+      voices.find((v) => v.lang === "en-US") ||
+      voices.find((v) => v.lang.startsWith("en"));
+    if (enVoice) utterance.voice = enVoice;
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  // ─── Fill-in-the-Blank ───
+  const startFillBlank = useCallback(() => {
+    const wordsWithEx = words.filter(
+      (w) =>
+        w.term &&
+        w.example &&
+        w.example.toLowerCase().includes(w.term.toLowerCase()),
+    );
+    if (wordsWithEx.length < 3)
+      return showToast("예문이 있는 단어가 3개 이상 필요합니다");
+    const shuffled = [...wordsWithEx]
+      .sort(() => Math.random() - 0.5)
+      .slice(0, Math.min(15, wordsWithEx.length));
+    setView("fillblank");
+    setFillPool(shuffled);
+    setFillCurrent(0);
+    setFillScore({ correct: 0, wrong: 0 });
+    setFillFinished(false);
+    setFillAnswered(false);
+    setFillUserAnswer("");
+  }, [words, showToast]);
+
+  const fillCheck = useCallback(() => {
+    const w = fillPool[fillCurrent];
+    const inputEl = document.getElementById("fill-input");
+    if (!inputEl) return;
+    const userAnswer = inputEl.value.trim().toLowerCase();
+    const correct = userAnswer === w.term.toLowerCase();
+    setFillScore((s) => ({
+      ...s,
+      [correct ? "correct" : "wrong"]: s[correct ? "correct" : "wrong"] + 1,
+    }));
+    setFillAnswered(true);
+    setFillUserAnswer(userAnswer);
+    if (inputEl) {
+      inputEl.classList.add(correct ? "correct" : "wrong");
+      inputEl.disabled = true;
+    }
+  }, [fillPool, fillCurrent]);
+
+  const fillNext = useCallback(() => {
+    const next = fillCurrent + 1;
+    setFillCurrent(next);
+    if (next >= fillPool.length) {
+      setFillFinished(true);
+    }
+    setFillAnswered(false);
+    setFillUserAnswer("");
+    setTimeout(() => {
+      const el = document.getElementById("fill-input");
+      if (el) el.focus();
+    }, 50);
+  }, [fillCurrent, fillPool]);
 
   // ─── Notion Sync ───
   const notionFetch = useCallback(async (path, method = "GET", body = null) => {
@@ -445,6 +543,7 @@ export default function VocabApp() {
   }, [words]);
 
   const isQuiz = view === "quiz";
+  const isFill = view === "fillblank";
   const filtered = getFiltered();
   const allTags = getAllTags();
   const hasFilters = search || filterTag || filterDifficulty > 0;
@@ -539,7 +638,24 @@ export default function VocabApp() {
         </div>
         <div className="quiz-center">
           <div className="quiz-question-label">{qLabel}</div>
-          <div className="quiz-question-word">{question}</div>
+          <div className="quiz-question-word">
+            {question}{" "}
+            {quizMode === "en-ko" && (
+              <button
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  opacity: 0.5,
+                  fontSize: 20,
+                  verticalAlign: "middle",
+                }}
+                onClick={(e) => speak(w.term, e)}
+              >
+                🔊
+              </button>
+            )}
+          </div>
           {hint && !quizShowAnswer && (
             <div className="quiz-hint">힌트: {hint}</div>
           )}
@@ -553,7 +669,24 @@ export default function VocabApp() {
           ) : (
             <>
               <div className="quiz-answer-box">
-                <div className="quiz-answer-text">{answer}</div>
+                <div className="quiz-answer-text">
+                  {answer}{" "}
+                  <button
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      opacity: 0.5,
+                      fontSize: 18,
+                      verticalAlign: "middle",
+                    }}
+                    onClick={(e) =>
+                      speak(quizMode === "en-ko" ? answer : w.term, e)
+                    }
+                  >
+                    🔊
+                  </button>
+                </div>
                 {w.example && (
                   <div className="quiz-answer-example">{w.example}</div>
                 )}
@@ -566,6 +699,172 @@ export default function VocabApp() {
                   알았어요 ✓
                 </button>
               </div>
+            </>
+          )}
+        </div>
+        <button
+          className="btn-ghost"
+          style={{ width: "100%", marginTop: 20, textAlign: "center" }}
+          onClick={() => setView("list")}
+        >
+          퀴즈 종료
+        </button>
+      </div>
+    );
+  };
+
+  // ─── Render: Fill-in-the-Blank ───
+  const renderFillBlank = () => {
+    if (fillFinished || fillPool.length === 0) {
+      const total = fillScore.correct + fillScore.wrong;
+      const pct = total > 0 ? Math.round((fillScore.correct / total) * 100) : 0;
+      const emoji = pct >= 80 ? "🎉" : pct >= 50 ? "💪" : "📖";
+      return (
+        <div className="quiz-center fade-in">
+          <div className="quiz-result-icon">{emoji}</div>
+          <div className="quiz-title">빈칸 퀴즈 완료!</div>
+          <div className="quiz-result-pct">{pct}%</div>
+          <div className="quiz-result-detail">
+            {total}개 중 {fillScore.correct}개 정답
+          </div>
+          <div className="quiz-result-actions">
+            <button className="btn btn-primary" onClick={startFillBlank}>
+              다시 하기
+            </button>
+            <button className="btn btn-outline" onClick={() => setView("list")}>
+              돌아가기
+            </button>
+          </div>
+        </div>
+      );
+    }
+    const w = fillPool[fillCurrent];
+    const regex = new RegExp(
+      w.term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "gi",
+    );
+    const parts = w.example.split(regex);
+    return (
+      <div style={{ maxWidth: 560, margin: "0 auto" }} className="fade-in">
+        <div className="quiz-header">
+          <span>
+            {fillCurrent + 1} / {fillPool.length}
+          </span>
+          <div>
+            <span className="quiz-score-ok">✓ {fillScore.correct}</span>
+            &nbsp;&nbsp;
+            <span className="quiz-score-fail">✗ {fillScore.wrong}</span>
+          </div>
+        </div>
+        <div className="quiz-progress-bar">
+          <div
+            className="quiz-progress-fill"
+            style={{ width: `${(fillCurrent / fillPool.length) * 100}%` }}
+          />
+        </div>
+        <div className="quiz-center">
+          <div className="quiz-question-label">
+            빈칸에 들어갈 단어를 입력하세요
+          </div>
+          <div
+            style={{ marginBottom: 12, fontSize: 15, color: "var(--text-dim)" }}
+          >
+            {w.meaning}
+          </div>
+          <div className="fill-sentence" style={{ marginBottom: 24 }}>
+            {parts.map((part, i) => (
+              <span key={i}>
+                {part}
+                {i < parts.length - 1 &&
+                  (fillAnswered ? (
+                    <span style={{ fontWeight: 700, color: "var(--accent)" }}>
+                      {w.term}
+                    </span>
+                  ) : (
+                    <input
+                      className="fill-blank-input"
+                      id="fill-input"
+                      placeholder="?"
+                      autoComplete="off"
+                      autoCapitalize="off"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") fillCheck();
+                      }}
+                    />
+                  ))}
+              </span>
+            ))}
+          </div>
+          {!fillAnswered ? (
+            <button className="quiz-reveal-btn" onClick={fillCheck}>
+              확인
+            </button>
+          ) : (
+            <>
+              <div
+                className="quiz-answer-box"
+                style={{
+                  borderColor:
+                    fillUserAnswer === w.term.toLowerCase()
+                      ? "rgba(90,171,106,0.4)"
+                      : "rgba(212,84,84,0.4)",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 14,
+                    color:
+                      fillUserAnswer === w.term.toLowerCase()
+                        ? "var(--success)"
+                        : "var(--danger)",
+                    marginBottom: 4,
+                  }}
+                >
+                  {fillUserAnswer === w.term.toLowerCase()
+                    ? "정답! ✓"
+                    : "오답 ✗"}
+                </div>
+                {fillUserAnswer !== w.term.toLowerCase() && (
+                  <div
+                    style={{
+                      fontSize: 13,
+                      color: "var(--text-muted)",
+                      marginBottom: 4,
+                    }}
+                  >
+                    내 답:{" "}
+                    <span style={{ textDecoration: "line-through" }}>
+                      {fillUserAnswer || "(빈 답)"}
+                    </span>
+                  </div>
+                )}
+                <div
+                  className="quiz-answer-text"
+                  style={{ color: "var(--accent)" }}
+                >
+                  {w.term}{" "}
+                  <button
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      opacity: 0.5,
+                      fontSize: 18,
+                      verticalAlign: "middle",
+                    }}
+                    onClick={(e) => speak(w.term, e)}
+                  >
+                    🔊
+                  </button>
+                </div>
+              </div>
+              <button
+                className="quiz-reveal-btn"
+                onClick={fillNext}
+                style={{ marginTop: 12 }}
+              >
+                {fillCurrent + 1 >= fillPool.length ? "결과 보기" : "다음 →"}
+              </button>
             </>
           )}
         </div>
@@ -822,6 +1121,44 @@ export default function VocabApp() {
         <span className="filter-count">{filtered.length}개 표시</span>
       </div>
 
+      {/* Tag Tabs */}
+      {allTags.length > 0 &&
+        (() => {
+          const tagCounts = {};
+          words.forEach((w) =>
+            (w.tags || []).forEach((t) => {
+              tagCounts[t] = (tagCounts[t] || 0) + 1;
+            }),
+          );
+          return (
+            <div className="tag-tabs">
+              <button
+                className={`tag-tab${activeTagTab === "" ? " active" : ""}`}
+                onClick={() => {
+                  setActiveTagTab("");
+                  setFilterTag("");
+                }}
+              >
+                전체<span className="tag-tab-count">{words.length}</span>
+              </button>
+              {allTags.map((t) => (
+                <button
+                  key={t}
+                  className={`tag-tab${activeTagTab === t ? " active" : ""}`}
+                  onClick={() => {
+                    const next = activeTagTab === t ? "" : t;
+                    setActiveTagTab(next);
+                    setFilterTag(next);
+                  }}
+                >
+                  {t}
+                  <span className="tag-tab-count">{tagCounts[t] || 0}</span>
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+
       {filtered.length === 0 ? (
         words.length === 0 ? (
           <div className="empty">
@@ -854,6 +1191,18 @@ export default function VocabApp() {
                   <div className="card-left">
                     <div className="term-row">
                       <span className="term">{w.term}</span>
+                      <span
+                        className="star"
+                        onClick={(e) => speak(w.term, e)}
+                        title="발음 듣기"
+                        style={{
+                          cursor: "pointer",
+                          opacity: 0.5,
+                          fontSize: 16,
+                        }}
+                      >
+                        🔊
+                      </span>
                       <Stars
                         rating={w.difficulty || 0}
                         interactive
@@ -932,7 +1281,14 @@ export default function VocabApp() {
             <div className="word-count">{words.length}개 단어 수집됨</div>
           </div>
           <div className="header-actions">
-            {!isQuiz && (
+            <button
+              className="theme-toggle"
+              onClick={toggleTheme}
+              title="테마 전환"
+            >
+              {theme === "dark" ? "☀️" : "🌙"}
+            </button>
+            {!isQuiz && !isFill && (
               <button
                 className="btn btn-outline"
                 style={{
@@ -955,19 +1311,24 @@ export default function VocabApp() {
                 동기화
               </button>
             )}
-            {words.length >= 3 && !isQuiz && (
-              <button
-                className="btn btn-outline"
-                onClick={() => {
-                  setView("quiz");
-                  setQuizMode(null);
-                  setQuizFinished(false);
-                }}
-              >
-                복습 퀴즈
-              </button>
+            {words.length >= 3 && !isQuiz && !isFill && (
+              <>
+                <button
+                  className="btn btn-outline"
+                  onClick={() => {
+                    setView("quiz");
+                    setQuizMode(null);
+                    setQuizFinished(false);
+                  }}
+                >
+                  복습 퀴즈
+                </button>
+                <button className="btn btn-outline" onClick={startFillBlank}>
+                  빈칸 퀴즈
+                </button>
+              </>
             )}
-            {view !== "add" && !isQuiz && (
+            {view !== "add" && !isQuiz && !isFill && (
               <button
                 className="btn btn-primary"
                 onClick={() => {
@@ -979,7 +1340,7 @@ export default function VocabApp() {
                 + 단어 추가
               </button>
             )}
-            {isQuiz && (
+            {(isQuiz || isFill) && (
               <button
                 className="btn btn-outline"
                 onClick={() => setView("list")}
@@ -993,6 +1354,7 @@ export default function VocabApp() {
 
       <div className="content">
         {view === "quiz" && renderQuiz()}
+        {view === "fillblank" && renderFillBlank()}
         {view === "add" && renderForm(null)}
         {view === "edit" && editWord && renderForm(editWord)}
         {view === "list" && renderList()}
