@@ -477,6 +477,7 @@ export default function VocabApp() {
     try {
       const updated = [...words];
       for (let i = 0; i < updated.length; i++) {
+        if (!updated[i]._localOnly) continue;
         const data = await notionFetch("/api/words", "POST", updated[i]);
         if (data.success && data.id) {
           updated[i] = { ...updated[i], id: data.id, _localOnly: undefined };
@@ -801,6 +802,7 @@ export default function VocabApp() {
                 ...w,
                 id: w.id || generateId(),
                 createdAt: w.createdAt || Date.now(),
+                _localOnly: true,
               });
               existing.add(w.term.toLowerCase());
               added++;
@@ -810,6 +812,32 @@ export default function VocabApp() {
           setWords(next);
           saveWords(next);
           showToast(`${added}개 단어 가져오기 완료!`);
+          // Auto-sync imported words to Notion if credentials present
+          if (notionApiKey && notionDbId && toAdd.length > 0) {
+            (async () => {
+              let synced = 0;
+              const updated = [...next];
+              for (const w of toAdd) {
+                try {
+                  const data = await notionFetch("/api/words", "POST", w);
+                  if (data.success && data.id) {
+                    const idx = updated.findIndex((x) => x.id === w.id);
+                    if (idx >= 0) {
+                      updated[idx] = { ...updated[idx], id: data.id, _localOnly: undefined };
+                    }
+                    synced++;
+                  }
+                } catch (e) {
+                  console.warn("가져오기 동기화 실패:", e);
+                }
+              }
+              if (synced > 0) {
+                setWords(updated);
+                saveWords(updated);
+                showToast(`${synced}개 단어 Notion 동기화 완료!`);
+              }
+            })();
+          }
         } catch {
           showToast("파일 형식이 올바르지 않습니다");
         }
@@ -817,7 +845,7 @@ export default function VocabApp() {
       reader.readAsText(file);
     };
     input.click();
-  }, [words, saveWords, showToast]);
+  }, [words, saveWords, showToast, notionApiKey, notionDbId, notionFetch]);
 
   // ─── Quiz ───
   const startQuiz = useCallback(
