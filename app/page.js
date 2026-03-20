@@ -407,13 +407,39 @@ export default function VocabApp() {
         const data = await notionFetch("/api/words");
         if (data.success && data.words) {
           setWords((prev) => {
-            const notionIds = new Set(data.words.map((w) => w.id));
-            const notionTerms = new Set(data.words.map((w) => w.term.toLowerCase()));
-            // Preserve local-only words (both flagged and unflagged) that aren't in Notion
-            const localOnly = prev
-              .filter((w) => !notionIds.has(w.id) && !notionTerms.has(w.term.toLowerCase()))
-              .map((w) => w._localOnly ? w : { ...w, _localOnly: true });
-            const merged = [...data.words, ...localOnly];
+            // Build lookup maps for both sides
+            const localByTerm = new Map();
+            prev.forEach((w) => localByTerm.set(w.term.toLowerCase(), w));
+
+            const notionByTerm = new Map();
+            data.words.forEach((w) => notionByTerm.set(w.term.toLowerCase(), w));
+
+            const merged = [];
+            const seen = new Set();
+
+            // 1. For words in both: keep local version with Notion ID (local edits preserved)
+            //    For words only in Notion: add as-is
+            data.words.forEach((nw) => {
+              const key = nw.term.toLowerCase();
+              const local = localByTerm.get(key);
+              if (local && local.id !== nw.id) {
+                // Same word exists locally with different ID → local was modified, keep local data with Notion ID
+                merged.push({ ...local, id: nw.id, _localOnly: undefined });
+              } else {
+                merged.push(nw);
+              }
+              seen.add(key);
+            });
+
+            // 2. Local-only words not in Notion: preserve with _localOnly flag
+            prev.forEach((w) => {
+              const key = w.term.toLowerCase();
+              if (!seen.has(key)) {
+                merged.push(w._localOnly ? w : { ...w, _localOnly: true });
+                seen.add(key);
+              }
+            });
+
             saveWords(merged);
             return merged;
           });
