@@ -408,9 +408,11 @@ export default function VocabApp() {
         if (data.success && data.words) {
           setWords((prev) => {
             const notionIds = new Set(data.words.map((w) => w.id));
-            const localOnly = prev.filter(
-              (w) => !notionIds.has(w.id) && w._localOnly,
-            );
+            const notionTerms = new Set(data.words.map((w) => w.term.toLowerCase()));
+            // Preserve local-only words (both flagged and unflagged) that aren't in Notion
+            const localOnly = prev
+              .filter((w) => !notionIds.has(w.id) && !notionTerms.has(w.term.toLowerCase()))
+              .map((w) => w._localOnly ? w : { ...w, _localOnly: true });
             const merged = [...data.words, ...localOnly];
             saveWords(merged);
             return merged;
@@ -475,10 +477,22 @@ export default function VocabApp() {
     setSyncStatus("syncing");
     let uploaded = 0;
     try {
+      // First, fetch existing Notion words to detect unsynced local words
+      let notionTerms = new Set();
+      try {
+        const data = await notionFetch("/api/words");
+        if (data.success && data.words) {
+          notionTerms = new Set(data.words.map((w) => w.term.toLowerCase()));
+        }
+      } catch (e) {
+        console.warn("Notion 조회 실패, 전체 업로드 진행:", e);
+      }
       const updated = [...words];
       for (let i = 0; i < updated.length; i++) {
-        if (!updated[i]._localOnly) continue;
-        const data = await notionFetch("/api/words", "POST", updated[i]);
+        const w = updated[i];
+        // Upload if: explicitly _localOnly, or not in Notion (by term match)
+        if (!w._localOnly && notionTerms.has(w.term.toLowerCase())) continue;
+        const data = await notionFetch("/api/words", "POST", w);
         if (data.success && data.id) {
           updated[i] = { ...updated[i], id: data.id, _localOnly: undefined };
           uploaded++;
