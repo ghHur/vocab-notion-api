@@ -86,8 +86,10 @@ export default function VocabApp() {
   // Theme
   const [theme, setTheme] = useState("dark");
 
-  // Tag tabs
-  const [activeTagTab, setActiveTagTab] = useState("");
+  // Tag tabs - hierarchical
+  const [activeSubject, setActiveSubjectState] = useState("");
+  const [activeSource, setActiveSourceState] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
 
   // Fill-in-the-blank quiz state
   const [fillPool, setFillPool] = useState([]);
@@ -523,6 +525,7 @@ export default function VocabApp() {
       );
     }
     if (filterTag) w = w.filter((x) => (x.tags || []).includes(filterTag));
+    if (filterCategory) w = w.filter((x) => (x.tags || []).includes(filterCategory));
     if (filterDifficulty > 0)
       w = w.filter((x) => (x.difficulty || 0) === filterDifficulty);
     w.sort((a, b) => {
@@ -534,7 +537,7 @@ export default function VocabApp() {
       return 0;
     });
     return w;
-  }, [words, search, filterTag, filterDifficulty, sortBy]);
+  }, [words, search, filterTag, filterCategory, filterDifficulty, sortBy]);
 
   const getAllTags = useCallback(() => {
     const set = new Set();
@@ -542,11 +545,89 @@ export default function VocabApp() {
     return [...set].sort();
   }, [words]);
 
+  // ─── Tag classification helpers ───
+  const isSubjectTag = (tag) => /^[A-Z]+\d+$/.test(tag);
+  const isSourceTag = (tag) => tag.includes("-");
+  const isCategoryTag = (tag) => !isSubjectTag(tag) && !isSourceTag(tag);
+
+  const getSubjectTags = useCallback(() => {
+    const counts = {};
+    words.forEach((w) =>
+      (w.tags || []).filter(isSubjectTag).forEach((t) => {
+        counts[t] = (counts[t] || 0) + 1;
+      }),
+    );
+    return Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [words]);
+
+  const getSourceTagsForSubject = useCallback(
+    (subject) => {
+      const counts = {};
+      words.forEach((w) => {
+        const tags = w.tags || [];
+        if (tags.includes(subject)) {
+          tags
+            .filter((t) => isSourceTag(t) && t.startsWith(subject + "-"))
+            .forEach((t) => {
+              counts[t] = (counts[t] || 0) + 1;
+            });
+        }
+      });
+      return Object.entries(counts).sort((a, b) => {
+        const aNum = a[0].replace(subject + "-", "");
+        const bNum = b[0].replace(subject + "-", "");
+        return aNum.localeCompare(bNum, undefined, { numeric: true });
+      });
+    },
+    [words],
+  );
+
+  const getCategoryTags = useCallback(() => {
+    const counts = {};
+    words.forEach((w) =>
+      (w.tags || []).filter(isCategoryTag).forEach((t) => {
+        counts[t] = (counts[t] || 0) + 1;
+      }),
+    );
+    return Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [words]);
+
+  const getSubjectWordCount = useCallback(
+    (subject) => {
+      return words.filter((w) => (w.tags || []).includes(subject)).length;
+    },
+    [words],
+  );
+
+  const handleSubjectClick = (subject) => {
+    if (activeSubject === subject) {
+      setActiveSubjectState("");
+      setActiveSourceState("");
+      setFilterTag("");
+    } else {
+      setActiveSubjectState(subject);
+      setActiveSourceState("");
+      setFilterTag(subject);
+    }
+  };
+
+  const handleSourceClick = (source) => {
+    if (activeSource === source) {
+      setActiveSourceState("");
+      setFilterTag(activeSubject);
+    } else {
+      setActiveSourceState(source);
+      setFilterTag(source);
+    }
+  };
+
   const isQuiz = view === "quiz";
   const isFill = view === "fillblank";
   const filtered = getFiltered();
   const allTags = getAllTags();
-  const hasFilters = search || filterTag || filterDifficulty > 0;
+  const subjectTags = getSubjectTags();
+  const categoryTags = getCategoryTags();
+  const hasFilters = search || filterTag || filterCategory || filterDifficulty > 0;
 
   // ─── Render: Quiz ───
   const renderQuiz = () => {
@@ -1082,16 +1163,16 @@ export default function VocabApp() {
           <option value="alpha">알파벳순</option>
           <option value="difficulty">난이도순</option>
         </select>
-        {allTags.length > 0 && (
+        {categoryTags.length > 0 && (
           <select
-            className={`filter-select${filterTag ? " active" : ""}`}
-            value={filterTag}
-            onChange={(e) => setFilterTag(e.target.value)}
+            className={`filter-select${filterCategory ? " active" : ""}`}
+            value={filterCategory}
+            onChange={(e) => setFilterCategory(e.target.value)}
           >
-            <option value="">모든 태그</option>
-            {allTags.map((t) => (
+            <option value="">모든 카테고리</option>
+            {categoryTags.map(([t, c]) => (
               <option key={t} value={t}>
-                {t}
+                {t} ({c})
               </option>
             ))}
           </select>
@@ -1112,7 +1193,10 @@ export default function VocabApp() {
             onClick={() => {
               setSearch("");
               setFilterTag("");
+              setFilterCategory("");
               setFilterDifficulty(0);
+              setActiveSubjectState("");
+              setActiveSourceState("");
             }}
           >
             필터 초기화
@@ -1121,43 +1205,57 @@ export default function VocabApp() {
         <span className="filter-count">{filtered.length}개 표시</span>
       </div>
 
-      {/* Tag Tabs */}
-      {allTags.length > 0 &&
-        (() => {
-          const tagCounts = {};
-          words.forEach((w) =>
-            (w.tags || []).forEach((t) => {
-              tagCounts[t] = (tagCounts[t] || 0) + 1;
-            }),
-          );
-          return (
-            <div className="tag-tabs">
+      {/* Hierarchical Tag Tabs */}
+      {(subjectTags.length > 0 || words.length > 0) && (
+        <div className="tag-hierarchy">
+          {/* Level 1: Subject tabs */}
+          <div className="tag-level">
+            <button
+              className={`tag-tab${activeSubject === "" ? " active" : ""}`}
+              onClick={() => handleSubjectClick("")}
+            >
+              전체<span className="tag-tab-count">{words.length}</span>
+            </button>
+            {subjectTags.map(([t, c]) => (
               <button
-                className={`tag-tab${activeTagTab === "" ? " active" : ""}`}
-                onClick={() => {
-                  setActiveTagTab("");
-                  setFilterTag("");
-                }}
+                key={t}
+                className={`tag-tab${activeSubject === t ? " active" : ""}`}
+                onClick={() => handleSubjectClick(t)}
               >
-                전체<span className="tag-tab-count">{words.length}</span>
+                {t}<span className="tag-tab-count">{c}</span>
               </button>
-              {allTags.map((t) => (
+            ))}
+          </div>
+          {/* Level 2: Source tabs (only when subject is selected) */}
+          {activeSubject && (() => {
+            const sourceTags = getSourceTagsForSubject(activeSubject);
+            if (sourceTags.length === 0) return null;
+            const subjectCount = getSubjectWordCount(activeSubject);
+            return (
+              <div className="tag-level tag-level-2">
                 <button
-                  key={t}
-                  className={`tag-tab${activeTagTab === t ? " active" : ""}`}
-                  onClick={() => {
-                    const next = activeTagTab === t ? "" : t;
-                    setActiveTagTab(next);
-                    setFilterTag(next);
-                  }}
+                  className={`tag-tab${activeSource === "" ? " active" : ""}`}
+                  onClick={() => handleSourceClick("")}
                 >
-                  {t}
-                  <span className="tag-tab-count">{tagCounts[t] || 0}</span>
+                  전체<span className="tag-tab-count">{subjectCount}</span>
                 </button>
-              ))}
-            </div>
-          );
-        })()}
+                {sourceTags.map(([t, c]) => {
+                  const label = t.replace(activeSubject + "-", "");
+                  return (
+                    <button
+                      key={t}
+                      className={`tag-tab${activeSource === t ? " active" : ""}`}
+                      onClick={() => handleSourceClick(t)}
+                    >
+                      {label}<span className="tag-tab-count">{c}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {filtered.length === 0 ? (
         words.length === 0 ? (
