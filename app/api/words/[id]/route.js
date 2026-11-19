@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { updateWord, deleteWord } from "@/lib/notion";
 
+export const maxDuration = 60;
+
 // ─── 요청에서 Notion 자격증명 추출 ───
 function getCredentials(request) {
   const apiKey = request.headers.get("x-notion-api-key") || process.env.NOTION_API_KEY;

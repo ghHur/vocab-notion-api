@@ -1,11 +1,28 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  planSync,
+  mergeFull,
+  mergeIncremental,
+  applyUploadedIds,
+  chunk,
+  BULK_CHUNK_SIZE,
+} from "@/lib/sync";
 
 // ─── Utils ───
 const STORAGE_KEY = "vocab-notebook-words";
 const THEME_KEY = "vocab-theme";
 const NOTION_KEY = "vocab-notion-credentials";
+const SYNC_META_KEY = "vocab-notion-sync-meta"; // { dbId, lastSync, lastFullSync }
+
+function loadSyncMeta() {
+  try {
+    return JSON.parse(localStorage.getItem(SYNC_META_KEY)) || null;
+  } catch {
+    return null;
+  }
+}
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -69,6 +86,12 @@ export default function VocabApp() {
   const [sortBy, setSortBy] = useState("newest");
   const [expandedId, setExpandedId] = useState(null);
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | success | error
+  const [syncProgress, setSyncProgress] = useState(null); // { done, total } 대량 업로드 진행률
+  const uploadingRef = useRef(false);
+  const wordsRef = useRef([]);
+  useEffect(() => {
+    wordsRef.current = words;
+  }, [words]);
   const [toast, setToast] = useState({ message: "", show: false });
 
   // Quiz state
@@ -165,7 +188,7 @@ export default function VocabApp() {
   // Notion 자격증명 로드 후 자동 동기화
   useEffect(() => {
     if (hasNotionCredentials) {
-      syncFromNotion(true);
+      syncFromNotion({ silent: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasNotionCredentials]);
@@ -378,6 +401,7 @@ export default function VocabApp() {
     setNotionApiKey("");
     setNotionDbId("");
     localStorage.removeItem(NOTION_KEY);
+    localStorage.removeItem(SYNC_META_KEY);
     setShowNotionSettings(false);
     showToast("Notion 연결 해제됨");
   }, [showToast]);
@@ -400,51 +424,60 @@ export default function VocabApp() {
     return res.json();
   }, [notionApiKey, notionDbId]);
 
+  // 평소에는 마지막 동기화 이후 바뀐 단어만 받아오고,
+  // 처음 연결했을 때·일주일마다·직접 요청했을 때는 전체를 받아와 노션에서 지운 단어까지 반영한다.
   const syncFromNotion = useCallback(
-    async (silent = false) => {
+    async ({ silent = false, full = false } = {}) => {
       setSyncStatus("syncing");
       try {
-        const data = await notionFetch("/api/words");
+        const meta = loadSyncMeta();
+        const plan = planSync(meta, notionDbId, Date.now(), { forceFull: full });
+        const path = plan.since
+          ? `/api/words?since=${encodeURIComponent(plan.since)}`
+          : "/api/words";
+        const data = await notionFetch(path);
         if (data.success && data.words) {
+          // 토스트에 보여줄 "노션에서 지운 단어 수" (상태 갱신은 아래 함수형 업데이트로)
+          const removed = plan.full
+            ? mergeFull(wordsRef.current, data.words, {
+                propagateDeletes: plan.sameDb,
+              }).removed
+            : 0;
           setWords((prev) => {
-            // Build lookup maps for both sides
-            const localByTerm = new Map();
-            prev.forEach((w) => localByTerm.set(w.term.toLowerCase(), w));
-
-            const notionByTerm = new Map();
-            data.words.forEach((w) => notionByTerm.set(w.term.toLowerCase(), w));
-
-            const merged = [];
-            const seen = new Set();
-
-            // 1. For words in both: keep local version with Notion ID (local edits preserved)
-            //    For words only in Notion: add as-is
-            data.words.forEach((nw) => {
-              const key = nw.term.toLowerCase();
-              const local = localByTerm.get(key);
-              if (local && local.id !== nw.id) {
-                // Same word exists locally with different ID → local was modified, keep local data with Notion ID
-                merged.push({ ...local, id: nw.id, _localOnly: undefined });
-              } else {
-                merged.push(nw);
-              }
-              seen.add(key);
-            });
-
-            // 2. Local-only words not in Notion: preserve with _localOnly flag
-            prev.forEach((w) => {
-              const key = w.term.toLowerCase();
-              if (!seen.has(key)) {
-                merged.push(w._localOnly ? w : { ...w, _localOnly: true });
-                seen.add(key);
-              }
-            });
-
-            saveWords(merged);
-            return merged;
+            let next;
+            if (plan.full) {
+              next = mergeFull(prev, data.words, {
+                propagateDeletes: plan.sameDb,
+              }).merged;
+            } else {
+              next = mergeIncremental(prev, data.words);
+            }
+            saveWords(next);
+            return next;
           });
+          localStorage.setItem(
+            SYNC_META_KEY,
+            JSON.stringify({
+              dbId: notionDbId,
+              lastSync: data.serverTime || new Date().toISOString(),
+              lastFullSync: plan.full ? Date.now() : meta.lastFullSync,
+            }),
+          );
           setSyncStatus("success");
-          if (!silent) showToast(`동기화 완료! ${data.words.length}개 단어`);
+          if (!silent) {
+            if (plan.full) {
+              showToast(
+                `전체 동기화 완료! ${data.words.length}개 단어` +
+                  (removed > 0 ? ` (노션에서 지운 ${removed}개 반영)` : ""),
+              );
+            } else {
+              showToast(
+                data.words.length > 0
+                  ? `동기화 완료! 바뀐 단어 ${data.words.length}개`
+                  : "이미 최신 상태예요",
+              );
+            }
+          }
         }
       } catch (e) {
         setSyncStatus("error");
@@ -452,7 +485,7 @@ export default function VocabApp() {
       }
       setTimeout(() => setSyncStatus("idle"), 3000);
     },
-    [notionFetch, saveWords, showToast],
+    [notionFetch, notionDbId, saveWords, showToast],
   );
 
   const syncAdd = useCallback(
@@ -499,11 +532,48 @@ export default function VocabApp() {
     [notionFetch],
   );
 
+  // ─── 여러 단어를 20개씩 묶어서 노션에 올리기 ───
+  // 묶음마다 결과를 바로 저장해서, 중간에 앱을 닫아도 올라간 단어는 연결이 유지되고
+  // 남은 단어는 "↑ Notion 업로드" 버튼으로 이어서 올릴 수 있다.
+  const uploadWordsInBulk = useCallback(
+    async (toUpload) => {
+      const total = toUpload.length;
+      let done = 0;
+      let uploaded = 0;
+      setSyncProgress({ done: 0, total });
+      for (const group of chunk(toUpload, BULK_CHUNK_SIZE)) {
+        try {
+          const data = await notionFetch("/api/words/bulk", "POST", {
+            words: group,
+          });
+          const idMap = new Map();
+          (data.results || []).forEach((r, i) => {
+            if (r?.id && group[i]) idMap.set(group[i].id, r.id);
+          });
+          uploaded += idMap.size;
+          setWords((prev) => {
+            const next = applyUploadedIds(prev, idMap);
+            saveWords(next);
+            return next;
+          });
+        } catch (e) {
+          console.warn("Notion 일괄 추가 실패:", e);
+        }
+        done += group.length;
+        setSyncProgress({ done, total });
+      }
+      setSyncProgress(null);
+      return { uploaded, failed: total - uploaded };
+    },
+    [notionFetch, saveWords],
+  );
+
   const uploadAllToNotion = useCallback(async () => {
+    if (uploadingRef.current) return;
+    uploadingRef.current = true;
     setSyncStatus("syncing");
-    let uploaded = 0;
     try {
-      // First, fetch existing Notion words to detect unsynced local words
+      // 노션에 이미 있는 단어는 건너뛰기 위해 먼저 노션 단어 목록 확인
       let notionTerms = new Set();
       try {
         const data = await notionFetch("/api/words");
@@ -513,27 +583,22 @@ export default function VocabApp() {
       } catch (e) {
         console.warn("Notion 조회 실패, 전체 업로드 진행:", e);
       }
-      const updated = [...words];
-      for (let i = 0; i < updated.length; i++) {
-        const w = updated[i];
-        // Upload if: explicitly _localOnly, or not in Notion (by term match)
-        if (!w._localOnly && notionTerms.has(w.term.toLowerCase())) continue;
-        const data = await notionFetch("/api/words", "POST", w);
-        if (data.success && data.id) {
-          updated[i] = { ...updated[i], id: data.id, _localOnly: undefined };
-          uploaded++;
-        }
-      }
-      setWords(updated);
-      saveWords(updated);
-      setSyncStatus("success");
-      showToast(`${uploaded}개 단어 업로드 완료!`);
+      const toUpload = words.filter(
+        (w) => w._localOnly || !notionTerms.has(w.term.toLowerCase()),
+      );
+      const { uploaded, failed } = await uploadWordsInBulk(toUpload);
+      setSyncStatus(failed > 0 ? "error" : "success");
+      showToast(
+        `${uploaded}개 단어 업로드 완료!` +
+          (failed > 0 ? ` ${failed}개 실패 — 다시 눌러 이어서 올릴 수 있어요` : ""),
+      );
     } catch (e) {
       setSyncStatus("error");
       showToast("업로드 실패: " + e.message);
     }
+    uploadingRef.current = false;
     setTimeout(() => setSyncStatus("idle"), 3000);
-  }, [words, notionFetch, saveWords, showToast]);
+  }, [words, notionFetch, uploadWordsInBulk, showToast]);
 
   // ─── Handlers ───
   const handleAdd = useCallback(() => {
@@ -852,30 +917,19 @@ export default function VocabApp() {
           setWords(next);
           saveWords(next);
           showToast(`${added}개 단어 가져오기 완료!`);
-          // Auto-sync imported words to Notion if credentials present
-          if (notionApiKey && notionDbId && toAdd.length > 0) {
+          // Notion이 연결돼 있으면 가져온 단어를 20개씩 묶어서 바로 올리기
+          if (notionApiKey && notionDbId && toAdd.length > 0 && !uploadingRef.current) {
             (async () => {
-              let synced = 0;
-              const updated = [...next];
-              for (const w of toAdd) {
-                try {
-                  const data = await notionFetch("/api/words", "POST", w);
-                  if (data.success && data.id) {
-                    const idx = updated.findIndex((x) => x.id === w.id);
-                    if (idx >= 0) {
-                      updated[idx] = { ...updated[idx], id: data.id, _localOnly: undefined };
-                    }
-                    synced++;
-                  }
-                } catch (e) {
-                  console.warn("가져오기 동기화 실패:", e);
-                }
-              }
-              if (synced > 0) {
-                setWords(updated);
-                saveWords(updated);
-                showToast(`${synced}개 단어 Notion 동기화 완료!`);
-              }
+              uploadingRef.current = true;
+              setSyncStatus("syncing");
+              const { uploaded, failed } = await uploadWordsInBulk(toAdd);
+              uploadingRef.current = false;
+              setSyncStatus(failed > 0 ? "error" : "success");
+              showToast(
+                `${uploaded}개 단어 Notion 동기화 완료!` +
+                  (failed > 0 ? ` ${failed}개 실패 — "↑ Notion 업로드"로 다시 올릴 수 있어요` : ""),
+              );
+              setTimeout(() => setSyncStatus("idle"), 3000);
             })();
           }
         } catch {
@@ -885,7 +939,7 @@ export default function VocabApp() {
       reader.readAsText(file);
     };
     input.click();
-  }, [words, saveWords, showToast, notionApiKey, notionDbId, notionFetch]);
+  }, [words, saveWords, showToast, notionApiKey, notionDbId, uploadWordsInBulk]);
 
   // ─── Quiz ───
   const startQuiz = useCallback(
@@ -1841,7 +1895,11 @@ export default function VocabApp() {
         {hasNotionCredentials && words.some((w) => w._localOnly) && (
           <button
             className="btn btn-outline"
-            style={{ fontSize: 12, padding: "6px 12px" }}
+            style={{
+              fontSize: 12,
+              padding: "6px 12px",
+              ...(syncStatus === "syncing" ? { opacity: 0.5, pointerEvents: "none" } : {}),
+            }}
             onClick={uploadAllToNotion}
           >
             ↑ Notion 업로드
@@ -2637,10 +2695,12 @@ export default function VocabApp() {
                       <button
                         className="btn btn-outline btn-sm"
                         style={syncStatus === "syncing" ? { opacity: 0.5, pointerEvents: "none" } : {}}
-                        onClick={syncFromNotion}
-                        title="Notion 동기화"
+                        onClick={() => syncFromNotion()}
+                        title="Notion 동기화 (바뀐 단어만)"
                       >
-                        {syncStatus === "syncing" ? "⟳" : syncStatus === "success" ? "✓" : syncStatus === "error" ? "!" : "↻"} 동기화
+                        {syncProgress
+                          ? `⟳ ${syncProgress.done}/${syncProgress.total}`
+                          : `${syncStatus === "syncing" ? "⟳" : syncStatus === "success" ? "✓" : syncStatus === "error" ? "!" : "↻"} 동기화`}
                       </button>
                       <button
                         className="btn btn-outline btn-sm"
@@ -2786,12 +2846,24 @@ export default function VocabApp() {
             </div>
             <div className="modal-actions">
               {hasNotionCredentials && (
-                <button
-                  className="btn btn-outline btn-danger"
-                  onClick={disconnectNotion}
-                >
-                  연결 해제
-                </button>
+                <>
+                  <button
+                    className="btn btn-outline btn-danger"
+                    onClick={disconnectNotion}
+                  >
+                    연결 해제
+                  </button>
+                  <button
+                    className="btn btn-outline"
+                    title="노션의 모든 단어를 다시 받아오고, 노션에서 지운 단어도 반영합니다"
+                    onClick={() => {
+                      setShowNotionSettings(false);
+                      syncFromNotion({ full: true });
+                    }}
+                  >
+                    전체 동기화
+                  </button>
+                </>
               )}
               <div style={{ flex: 1 }} />
               <button
