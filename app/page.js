@@ -10,7 +10,7 @@ import {
   isNotionId,
   BULK_CHUNK_SIZE,
 } from "@/lib/sync";
-import { migrateAllTags } from "@/lib/tagMigration";
+import { migrateAllTags, findUnusedTagOptions } from "@/lib/tagMigration";
 
 // ─── Utils ───
 const STORAGE_KEY = "vocab-notebook-words";
@@ -90,6 +90,7 @@ export default function VocabApp() {
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | success | error
   const [syncProgress, setSyncProgress] = useState(null); // { done, total } 대량 업로드 진행률
   const uploadingRef = useRef(false);
+  const [tagAudit, setTagAudit] = useState(null); // { unused, total, usedCount } 노션 태그 점검 결과
   const wordsRef = useRef([]);
   useEffect(() => {
     wordsRef.current = words;
@@ -628,6 +629,25 @@ export default function VocabApp() {
     uploadingRef.current = false;
     setTimeout(() => setSyncStatus("idle"), 3000);
   }, [notionFetch, saveWords, showToast]);
+
+  // ─── 노션 태그 점검: 노션 DB의 태그 옵션 중 어떤 단어에도 안 쓰이는 것 찾기 ───
+  // (노션 API는 옵션을 한 번에 100개까지만 지정할 수 있어서 삭제는 노션에서 직접 한다)
+  const auditNotionTags = useCallback(async () => {
+    setSyncStatus("syncing");
+    try {
+      const [tagData, wordData] = await Promise.all([
+        notionFetch("/api/tags"),
+        notionFetch("/api/words"),
+      ]);
+      if (!tagData.success || !wordData.success) throw new Error("노션 정보를 받지 못했어요");
+      setTagAudit(findUnusedTagOptions(tagData.options || [], wordData.words || []));
+      setSyncStatus("success");
+    } catch (e) {
+      setSyncStatus("error");
+      showToast("태그 점검 실패: " + (e.message || "연결 오류"));
+    }
+    setTimeout(() => setSyncStatus("idle"), 3000);
+  }, [notionFetch, showToast]);
 
   const uploadAllToNotion = useCallback(async () => {
     if (uploadingRef.current) return;
@@ -2934,6 +2954,16 @@ export default function VocabApp() {
                   >
                     태그 통일
                   </button>
+                  <button
+                    className="btn btn-outline"
+                    title="노션 DB에 옵션으로만 남아 있고 어떤 단어에도 쓰이지 않는 태그를 찾습니다"
+                    onClick={() => {
+                      setShowNotionSettings(false);
+                      auditNotionTags();
+                    }}
+                  >
+                    태그 점검
+                  </button>
                 </>
               )}
               <div style={{ flex: 1 }} />
@@ -2953,6 +2983,62 @@ export default function VocabApp() {
                 }}
               >
                 저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tagAudit && (
+        <div className="modal-overlay" onClick={() => setTagAudit(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-title">노션 태그 점검</div>
+            <div className="modal-desc">
+              노션 DB의 태그 옵션 {tagAudit.total}개 중 {tagAudit.usedCount}개가 단어에 쓰이고 있어요.
+              {tagAudit.unused.length > 0
+                ? ` 아래 ${tagAudit.unused.length}개는 어떤 단어에도 쓰이지 않아요.`
+                : " 안 쓰는 태그 옵션이 없어요."}
+            </div>
+            {tagAudit.unused.length > 0 && (
+              <>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 6,
+                    maxHeight: 280,
+                    overflowY: "auto",
+                    margin: "8px 0 12px",
+                  }}
+                >
+                  {tagAudit.unused.map((t) => (
+                    <span key={t} className="tag">{t}</span>
+                  ))}
+                </div>
+                <div className="modal-desc" style={{ fontSize: 12 }}>
+                  노션 API는 태그 옵션을 한 번에 100개까지만 다룰 수 있어서 앱에서 지울 수 없어요.
+                  노션 단어장 DB에서 tags 속성 이름 → 속성 편집 → 옵션 옆 ⋯ → 삭제로 지워 주세요.
+                  어떤 단어에도 쓰이지 않는 옵션이라 지워도 단어는 바뀌지 않아요.
+                </div>
+              </>
+            )}
+            <div className="modal-actions">
+              {tagAudit.unused.length > 0 && (
+                <button
+                  className="btn btn-outline"
+                  onClick={() => {
+                    navigator.clipboard
+                      ?.writeText(tagAudit.unused.join("\n"))
+                      .then(() => showToast("목록을 복사했어요"))
+                      .catch(() => showToast("복사하지 못했어요"));
+                  }}
+                >
+                  목록 복사
+                </button>
+              )}
+              <div style={{ flex: 1 }} />
+              <button className="btn btn-primary" onClick={() => setTagAudit(null)}>
+                닫기
               </button>
             </div>
           </div>
