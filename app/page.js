@@ -91,6 +91,8 @@ export default function VocabApp() {
   const [syncProgress, setSyncProgress] = useState(null); // { done, total } 대량 업로드 진행률
   const uploadingRef = useRef(false);
   const [tagAudit, setTagAudit] = useState(null); // { unused, total, usedCount } 노션 태그 점검 결과
+  const [busy, setBusy] = useState(null); // 진행 중인 작업 설명 (로딩 표시용)
+  const [installPrompt, setInstallPrompt] = useState(null); // 앱 설치 안내 이벤트
   const wordsRef = useRef([]);
   useEffect(() => {
     wordsRef.current = words;
@@ -185,6 +187,17 @@ export default function VocabApp() {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
+    const onBeforeInstall = (e) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+    const onInstalled = () => setInstallPrompt(null);
+    window.addEventListener("beforeinstallprompt", onBeforeInstall);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstall);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -432,6 +445,7 @@ export default function VocabApp() {
   const syncFromNotion = useCallback(
     async ({ silent = false, full = false } = {}) => {
       setSyncStatus("syncing");
+      if (!silent) setBusy(full ? "노션 전체 동기화 중…" : "노션과 동기화 중…");
       try {
         const meta = loadSyncMeta();
         const plan = planSync(meta, notionDbId, Date.now(), { forceFull: full });
@@ -486,6 +500,7 @@ export default function VocabApp() {
         setSyncStatus("error");
         if (!silent) showToast("동기화 실패: " + (e.message || "연결 오류"));
       }
+      if (!silent) setBusy(null);
       setTimeout(() => setSyncStatus("idle"), 3000);
     },
     [notionFetch, notionDbId, saveWords, showToast],
@@ -543,6 +558,7 @@ export default function VocabApp() {
       const total = toUpload.length;
       let done = 0;
       let uploaded = 0;
+      setBusy("노션에 단어를 올리는 중…");
       setSyncProgress({ done: 0, total });
       for (const group of chunk(toUpload, BULK_CHUNK_SIZE)) {
         try {
@@ -566,6 +582,7 @@ export default function VocabApp() {
         setSyncProgress({ done, total });
       }
       setSyncProgress(null);
+      setBusy(null);
       return { uploaded, failed: total - uploaded };
     },
     [notionFetch, saveWords],
@@ -586,6 +603,7 @@ export default function VocabApp() {
       return;
     uploadingRef.current = true;
     setSyncStatus("syncing");
+    setBusy("태그를 새 규칙으로 바꾸는 중…");
     try {
       const data = await notionFetch("/api/words");
       if (!data.success || !data.words) throw new Error("노션 단어 목록을 받지 못했어요");
@@ -626,6 +644,7 @@ export default function VocabApp() {
       setSyncStatus("error");
       showToast("태그 통일 실패: " + (e.message || "연결 오류"));
     }
+    setBusy(null);
     uploadingRef.current = false;
     setTimeout(() => setSyncStatus("idle"), 3000);
   }, [notionFetch, saveWords, showToast]);
@@ -634,6 +653,7 @@ export default function VocabApp() {
   // (노션 API는 옵션을 한 번에 100개까지만 지정할 수 있어서 삭제는 노션에서 직접 한다)
   const auditNotionTags = useCallback(async () => {
     setSyncStatus("syncing");
+    setBusy("노션 태그를 점검하는 중…");
     try {
       const [tagData, wordData] = await Promise.all([
         notionFetch("/api/tags"),
@@ -646,6 +666,7 @@ export default function VocabApp() {
       setSyncStatus("error");
       showToast("태그 점검 실패: " + (e.message || "연결 오류"));
     }
+    setBusy(null);
     setTimeout(() => setSyncStatus("idle"), 3000);
   }, [notionFetch, showToast]);
 
@@ -2925,6 +2946,23 @@ export default function VocabApp() {
                 </ol>
               </details>
             </div>
+            {installPrompt && (
+              <div className="modal-field">
+                <button
+                  className="btn btn-primary"
+                  style={{ width: "100%" }}
+                  onClick={async () => {
+                    installPrompt.prompt();
+                    try {
+                      await installPrompt.userChoice;
+                    } catch {}
+                    setInstallPrompt(null);
+                  }}
+                >
+                  이 기기에 앱으로 설치
+                </button>
+              </div>
+            )}
             <div className="modal-actions">
               {hasNotionCredentials && (
                 <>
@@ -2936,6 +2974,7 @@ export default function VocabApp() {
                   </button>
                   <button
                     className="btn btn-outline"
+                    disabled={!!busy}
                     title="노션의 모든 단어를 다시 받아오고, 노션에서 지운 단어도 반영합니다"
                     onClick={() => {
                       setShowNotionSettings(false);
@@ -2946,6 +2985,7 @@ export default function VocabApp() {
                   </button>
                   <button
                     className="btn btn-outline"
+                    disabled={!!busy}
                     title="모든 단어의 태그를 새 규칙(과목 / 과목-단원 / 전공용어·일반)으로 통일합니다"
                     onClick={() => {
                       setShowNotionSettings(false);
@@ -2956,6 +2996,7 @@ export default function VocabApp() {
                   </button>
                   <button
                     className="btn btn-outline"
+                    disabled={!!busy}
                     title="노션 DB에 옵션으로만 남아 있고 어떤 단어에도 쓰이지 않는 태그를 찾습니다"
                     onClick={() => {
                       setShowNotionSettings(false);
@@ -3042,6 +3083,29 @@ export default function VocabApp() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {busy && (
+        <div className="busy-bar" role="status" aria-live="polite">
+          <div className="busy-row">
+            <span className="busy-spinner" aria-hidden="true" />
+            <span>{busy}</span>
+            {syncProgress && syncProgress.total > 0 && (
+              <span className="busy-count">
+                {syncProgress.done}/{syncProgress.total}
+              </span>
+            )}
+          </div>
+          {syncProgress && syncProgress.total > 0 && (
+            <div className="busy-track">
+              <div
+                className="busy-fill"
+                style={{ width: `${Math.round((syncProgress.done / syncProgress.total) * 100)}%` }}
+              />
+            </div>
+          )}
+          <div className="busy-hint">끝날 때까지 앱을 닫지 마세요</div>
         </div>
       )}
 
