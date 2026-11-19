@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createWords } from "@/lib/notion";
+import { createWords, updateWords } from "@/lib/notion";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -38,6 +38,33 @@ export async function POST(request) {
     console.error("POST /api/words/bulk error:", error);
     return NextResponse.json(
       { error: error.message || "단어 일괄 추가 실패" },
+      { status: 500 }
+    );
+  }
+}
+
+// ─── PATCH /api/words/bulk — 여러 단어 한 번에 수정 ───
+// 요청: { words: [{ id, ...바꿀 필드 }] }  응답: { success, results: [{ id } | { error }] } (입력 순서대로)
+export async function PATCH(request) {
+  try {
+    const { apiKey } = getCredentials(request);
+    const body = await request.json();
+    const words = body?.words;
+    if (!Array.isArray(words) || words.length === 0) {
+      return NextResponse.json({ error: "words 배열이 필요합니다" }, { status: 400 });
+    }
+    if (words.length > MAX_BULK) {
+      return NextResponse.json(
+        { error: `한 번에 최대 ${MAX_BULK}개까지 보낼 수 있습니다` },
+        { status: 400 }
+      );
+    }
+    const results = await updateWords(apiKey, words);
+    return NextResponse.json({ success: true, results });
+  } catch (error) {
+    console.error("PATCH /api/words/bulk error:", error);
+    return NextResponse.json(
+      { error: error.message || "단어 일괄 수정 실패" },
       { status: 500 }
     );
   }

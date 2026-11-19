@@ -7,8 +7,10 @@ import {
   mergeIncremental,
   applyUploadedIds,
   chunk,
+  isNotionId,
   BULK_CHUNK_SIZE,
 } from "@/lib/sync";
+import { migrateAllTags } from "@/lib/tagMigration";
 
 // ─── Utils ───
 const STORAGE_KEY = "vocab-notebook-words";
@@ -567,6 +569,65 @@ export default function VocabApp() {
     },
     [notionFetch, saveWords],
   );
+
+  // ─── 태그 규칙 통일 (1회성): 노션 최신 상태를 받아 규칙대로 바꾸고, 바뀐 단어만 20개씩 노션에 반영 ───
+  const migrateTagsToRule = useCallback(async () => {
+    if (uploadingRef.current) return;
+    if (
+      !window.confirm(
+        "모든 단어의 태그를 새 규칙으로 바꿀까요?\n" +
+          "· 출처 태그: Week01 → W1\n" +
+          "· 학술영어·학술어휘 → 일반, 나머지 → 전공용어\n" +
+          "· 과목 이름 태그(생물학·음악·통계·철학·글쓰기·수학) 삭제\n" +
+          "· 윤리 → 윤리학, MATH1040 빠진 섹션 태그 채우기",
+      )
+    )
+      return;
+    uploadingRef.current = true;
+    setSyncStatus("syncing");
+    try {
+      const data = await notionFetch("/api/words");
+      if (!data.success || !data.words) throw new Error("노션 단어 목록을 받지 못했어요");
+      const base = mergeFull(wordsRef.current, data.words, {
+        propagateDeletes: false,
+      }).merged;
+      const { next, changed, missingSource } = migrateAllTags(base);
+      setWords(next);
+      saveWords(next);
+
+      const toPush = changed.filter((w) => isNotionId(w.id) && !w._localOnly);
+      const total = toPush.length;
+      let done = 0;
+      let updated = 0;
+      setSyncProgress({ done: 0, total });
+      for (const group of chunk(toPush, BULK_CHUNK_SIZE)) {
+        try {
+          const res = await notionFetch("/api/words/bulk", "PATCH", {
+            words: group.map((w) => ({ id: w.id, tags: w.tags })),
+          });
+          updated += (res.results || []).filter((r) => r?.id).length;
+        } catch (e) {
+          console.warn("Notion 일괄 수정 실패:", e);
+        }
+        done += group.length;
+        setSyncProgress({ done, total });
+      }
+      setSyncProgress(null);
+      const failed = total - updated;
+      setSyncStatus(failed > 0 ? "error" : "success");
+      showToast(
+        `태그 통일 완료! ${updated}개 단어 노션 반영` +
+          (failed > 0 ? ` · ${failed}개 실패 — 다시 누르면 남은 것만 이어서 해요` : "") +
+          (missingSource > 0 ? ` · 출처 태그 없는 단어 ${missingSource}개` : ""),
+      );
+    } catch (e) {
+      setSyncProgress(null);
+      setSyncStatus("error");
+      showToast("태그 통일 실패: " + (e.message || "연결 오류"));
+    }
+    uploadingRef.current = false;
+    setTimeout(() => setSyncStatus("idle"), 3000);
+  }, [notionFetch, saveWords, showToast]);
 
   const uploadAllToNotion = useCallback(async () => {
     if (uploadingRef.current) return;
@@ -2862,6 +2923,16 @@ export default function VocabApp() {
                     }}
                   >
                     전체 동기화
+                  </button>
+                  <button
+                    className="btn btn-outline"
+                    title="모든 단어의 태그를 새 규칙(과목 / 과목-단원 / 전공용어·일반)으로 통일합니다"
+                    onClick={() => {
+                      setShowNotionSettings(false);
+                      migrateTagsToRule();
+                    }}
+                  >
+                    태그 통일
                   </button>
                 </>
               )}
