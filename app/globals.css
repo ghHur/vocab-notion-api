@@ -1343,3 +1343,34 @@ body {
     transform: rotate(360deg);
   }
 }
+
+/* 태그 관리: 단어 없는 태그 (노션 DB에 옵션으로만 남은 태그) */
+.tm-unused-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+.tm-unused-all {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.tm-unused-all:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+.tm-unused-all:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.tm-tag-unused {
+  opacity: 0.6;
+}
+.tm-tag-unused.active {
+  opacity: 1;
+}

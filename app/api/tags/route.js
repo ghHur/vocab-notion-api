@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { getTagOptions } from "@/lib/notion";
+import { getTagOptions, removeUnusedTagOptions } from "@/lib/notion";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 function getCredentials(request) {
   const apiKey = request.headers.get("x-notion-api-key") || process.env.NOTION_API_KEY;
@@ -22,6 +23,32 @@ export async function GET(request) {
     console.error("GET /api/tags error:", error);
     return NextResponse.json(
       { error: error.message || "태그 옵션 조회 실패" },
+      { status: 500 }
+    );
+  }
+}
+
+// ─── DELETE /api/tags — 어떤 단어에도 안 쓰이는 태그 옵션 삭제 ───
+// 요청: { names: [...] }  응답: { success, removed, inUse, notRemoved }
+export async function DELETE(request) {
+  try {
+    const { apiKey, dbId } = getCredentials(request);
+    const body = await request.json();
+    const names = Array.isArray(body?.names)
+      ? [...new Set(body.names.filter((n) => typeof n === "string" && n.trim()))]
+      : [];
+    if (names.length === 0) {
+      return NextResponse.json({ error: "names 배열이 필요합니다" }, { status: 400 });
+    }
+    if (names.length > 100) {
+      return NextResponse.json({ error: "한 번에 최대 100개까지 지울 수 있습니다" }, { status: 400 });
+    }
+    const result = await removeUnusedTagOptions(apiKey, dbId, names);
+    return NextResponse.json({ success: true, ...result });
+  } catch (error) {
+    console.error("DELETE /api/tags error:", error);
+    return NextResponse.json(
+      { error: error.message || "태그 옵션 삭제 실패" },
       { status: 500 }
     );
   }

@@ -93,6 +93,7 @@ export default function VocabApp() {
   const [tagAudit, setTagAudit] = useState(null); // { unused, total, usedCount } 노션 태그 점검 결과
   const [busy, setBusy] = useState(null); // 진행 중인 작업 설명 (로딩 표시용)
   const [installPrompt, setInstallPrompt] = useState(null); // 앱 설치 안내 이벤트
+  const [notionTagOptions, setNotionTagOptions] = useState(null); // 노션 DB에 등록된 태그 옵션 이름
   const wordsRef = useRef([]);
   useEffect(() => {
     wordsRef.current = words;
@@ -648,6 +649,51 @@ export default function VocabApp() {
     uploadingRef.current = false;
     setTimeout(() => setSyncStatus("idle"), 3000);
   }, [notionFetch, saveWords, showToast]);
+
+  // ─── 노션 DB의 태그 옵션 목록 (태그 관리에서 단어 없는 태그 표시용) ───
+  const loadNotionTagOptions = useCallback(async () => {
+    try {
+      const data = await notionFetch("/api/tags");
+      if (data.success) setNotionTagOptions(data.options || []);
+    } catch (e) {
+      console.warn("태그 옵션 조회 실패:", e);
+    }
+  }, [notionFetch]);
+
+  // ─── 단어 없는 태그를 노션 DB에서 삭제 ───
+  const deleteUnusedTags = useCallback(
+    async (names) => {
+      if (!names.length) return;
+      const label = names.length === 1 ? `"${names[0]}"` : `${names.length}개 태그`;
+      if (!window.confirm(`${label}를 노션 DB에서 지울까요?\n어떤 단어에도 쓰이지 않는 태그라 단어는 바뀌지 않아요.`))
+        return;
+      setBusy("노션에서 태그를 지우는 중…");
+      try {
+        const res = await notionFetch("/api/tags", "DELETE", { names });
+        const removed = res.removed?.length || 0;
+        const parts = [`${removed}개 삭제`];
+        if (res.inUse?.length) parts.push(`${res.inUse.length}개는 노션에서 사용 중이라 남김`);
+        if (res.notRemoved?.length) parts.push(`${res.notRemoved.length}개는 노션이 지우지 않음 — 노션에서 직접 지워 주세요`);
+        showToast("태그 정리: " + parts.join(" · "));
+        if (removed > 0 && names.includes(tmSelectedTag)) setTmSelectedTag("");
+      } catch (e) {
+        const msg = e.message || "";
+        showToast(
+          /100/.test(msg)
+            ? "노션 태그 옵션이 100개를 넘어서 앱에서 지울 수 없어요. 노션에서 직접 지워 주세요"
+            : "태그 삭제 실패: " + (msg.slice(0, 80) || "연결 오류"),
+        );
+      }
+      setBusy(null);
+      loadNotionTagOptions();
+    },
+    [notionFetch, showToast, loadNotionTagOptions, tmSelectedTag],
+  );
+
+  // 태그 관리를 열 때 노션 태그 옵션 목록 받아오기
+  useEffect(() => {
+    if (view === "tags" && hasNotionCredentials) loadNotionTagOptions();
+  }, [view, hasNotionCredentials, loadNotionTagOptions]);
 
   // ─── 노션 태그 점검: 노션 DB의 태그 옵션 중 어떤 단어에도 안 쓰이는 것 찾기 ───
   // (노션 API는 옵션을 한 번에 100개까지만 지정할 수 있어서 삭제는 노션에서 직접 한다)
@@ -2481,6 +2527,11 @@ export default function VocabApp() {
       }),
     );
     const tagList = Object.entries(tagMap).sort((a, b) => a[0].localeCompare(b[0]));
+    // 노션 DB에 옵션으로만 남아 있고 어떤 단어에도 없는 태그
+    const unusedTags = (notionTagOptions || [])
+      .filter((t) => !tagMap[t])
+      .sort((a, b) => a.localeCompare(b, "ko", { numeric: true }));
+    const selectedIsUnused = !!tmSelectedTag && !tagMap[tmSelectedTag] && unusedTags.includes(tmSelectedTag);
 
     // Words with selected tag
     const taggedWords = tmSelectedTag
@@ -2517,11 +2568,62 @@ export default function VocabApp() {
                 </div>
               )}
             </div>
+            {unusedTags.length > 0 && (
+              <>
+                <div className="tm-section-title tm-unused-title">
+                  <span>단어 없는 태그 ({unusedTags.length})</span>
+                  <button
+                    className="tm-unused-all"
+                    disabled={!!busy}
+                    onClick={() => deleteUnusedTags(unusedTags)}
+                  >
+                    모두 삭제
+                  </button>
+                </div>
+                <div className="tm-tag-list">
+                  {unusedTags.map((t) => (
+                    <button
+                      key={t}
+                      className={`tm-tag-item tm-tag-unused${tmSelectedTag === t ? " active" : ""}`}
+                      onClick={() => {
+                        setTmSelectedTag(tmSelectedTag === t ? "" : t);
+                        setTmSelectedWords(new Set());
+                        setTmAction("");
+                      }}
+                    >
+                      <span className="tm-tag-name">{t}</span>
+                      <span className="tm-tag-count">0</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Right: Tag detail & actions */}
           <div className="tm-main">
-            {!tmSelectedTag ? (
+            {selectedIsUnused ? (
+              <>
+                <div className="tm-tag-header">
+                  <div className="tm-tag-title">{tmSelectedTag}</div>
+                  <div className="tm-tag-subtitle">0개 단어 · 노션 DB에 옵션으로만 남아 있어요</div>
+                </div>
+                <div className="tm-panel">
+                  <div className="tm-panel-hint">
+                    어떤 단어에도 쓰이지 않는 태그예요. 지워도 단어는 바뀌지 않아요.
+                  </div>
+                  <div className="tm-panel-row">
+                    <button
+                      className="btn btn-outline btn-danger"
+                      disabled={!!busy}
+                      onClick={() => deleteUnusedTags([tmSelectedTag])}
+                    >
+                      노션에서 삭제
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : !tmSelectedTag ? (
               <div className="tm-empty">
                 <div style={{ fontSize: 32, marginBottom: 8 }}>🏷️</div>
                 <div style={{ color: "var(--text-dim)", fontSize: 14 }}>
