@@ -94,6 +94,7 @@ export default function VocabApp() {
   const [busy, setBusy] = useState(null); // 진행 중인 작업 설명 (로딩 표시용)
   const [installPrompt, setInstallPrompt] = useState(null); // 앱 설치 안내 이벤트
   const [notionTagOptions, setNotionTagOptions] = useState(null); // 노션 DB에 등록된 태그 옵션 이름
+  const [notionTagRebuilding, setNotionTagRebuilding] = useState(false); // 중간에 멈춘 태그 정리가 있는지
   const wordsRef = useRef([]);
   useEffect(() => {
     wordsRef.current = words;
@@ -654,11 +655,80 @@ export default function VocabApp() {
   const loadNotionTagOptions = useCallback(async () => {
     try {
       const data = await notionFetch("/api/tags");
-      if (data.success) setNotionTagOptions(data.options || []);
+      if (data.success) {
+        setNotionTagOptions(data.options || []);
+        setNotionTagRebuilding(!!data.rebuilding);
+      }
     } catch (e) {
       console.warn("태그 옵션 조회 실패:", e);
     }
   }, [notionFetch]);
+
+  // ─── 태그 속성 재구성으로 태그 지우기 ───
+  // 노션 API는 남길 태그가 100개를 넘으면 태그를 지울 수 없어서, tags 속성을 새로 만들고
+  // 모든 단어의 태그를 다시 써서 지울 태그만 빠지게 한다. 중간에 멈춰도 이어서 할 수 있다.
+  const runTagRebuild = useCallback(
+    async (names) => {
+      setBusy("노션 태그를 정리하는 중… (단어 태그를 새로 쓰는 중)");
+      setSyncStatus("syncing");
+      const total = Math.max(1, words.filter((w) => (w.tags || []).length > 0).length);
+      let done = 0;
+      setSyncProgress({ done: 0, total });
+      try {
+        const start = await notionFetch("/api/tags/rebuild", "POST", { action: "start", names });
+        setNotionTagRebuilding(true);
+        for (let pass = 0; pass < 3; pass++) {
+          let cursor = null;
+          do {
+            let step;
+            for (let attempt = 0; ; attempt++) {
+              try {
+                step = await notionFetch("/api/tags/rebuild", "POST", { action: "step", cursor });
+                break;
+              } catch (e) {
+                if (attempt >= 2) throw e;
+                await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
+              }
+            }
+            if (pass === 0) {
+              done = Math.min(total, done + step.processed);
+              setSyncProgress({ done, total });
+            }
+            cursor = step.nextCursor;
+          } while (cursor);
+          const fin = await notionFetch("/api/tags/rebuild", "POST", { action: "finish" });
+          if (fin.done) {
+            setNotionTagRebuilding(false);
+            setSyncStatus("success");
+            const removed = start.removed?.length || 0;
+            showToast(
+              start.resumed
+                ? "중간에 멈췄던 태그 정리를 마쳤어요"
+                : `태그 ${removed}개를 지웠어요` +
+                    (start.inUse?.length ? ` · ${start.inUse.length}개는 단어에 쓰이고 있어 남김` : ""),
+            );
+            if (names.includes(tmSelectedTag)) setTmSelectedTag("");
+            break;
+          }
+          if (pass === 2) throw new Error("아직 옮기지 못한 단어가 있어요");
+        }
+      } catch (e) {
+        setSyncStatus("error");
+        let msg = e.message || "";
+        try {
+          msg = JSON.parse(msg).error || msg;
+        } catch {}
+        showToast("태그 정리가 중간에 멈췄어요: " + msg.slice(0, 60) + " — 태그 관리에서 '이어서 하기'를 눌러 주세요");
+      }
+      setSyncProgress(null);
+      setBusy(null);
+      setTimeout(() => setSyncStatus("idle"), 3000);
+      loadNotionTagOptions();
+      // 모든 단어의 수정 시각이 바뀌었으니 바뀐 단어만 받아오는 동기화로 맞춘다
+      syncFromNotion({ silent: true });
+    },
+    [words, notionFetch, showToast, loadNotionTagOptions, syncFromNotion, tmSelectedTag],
+  );
 
   // ─── 단어 없는 태그를 노션 DB에서 삭제 ───
   const deleteUnusedTags = useCallback(
@@ -678,16 +748,32 @@ export default function VocabApp() {
         if (removed > 0 && names.includes(tmSelectedTag)) setTmSelectedTag("");
       } catch (e) {
         const msg = e.message || "";
-        showToast(
-          /100/.test(msg)
-            ? "노션 태그 옵션이 100개를 넘어서 앱에서 지울 수 없어요. 노션에서 직접 지워 주세요"
-            : "태그 삭제 실패: " + (msg.slice(0, 80) || "연결 오류"),
-        );
+        let info = null;
+        try {
+          info = JSON.parse(msg);
+        } catch {}
+        if (info?.needsRebuild || /100/.test(msg)) {
+          // 남길 태그가 100개를 넘어 바로는 못 지움 → 태그 속성 재구성으로 지우기
+          setBusy(null);
+          const count = words.filter((w) => (w.tags || []).length > 0).length;
+          if (
+            window.confirm(
+              `노션 API 제한(한 번에 태그 100개)으로 바로 지울 수 없어서, tags 속성을 새로 만들어 지울게요.\n\n` +
+                `· 태그가 있는 단어 약 ${count}개의 태그를 다시 써서 몇 분 걸려요\n` +
+                `· 단어 내용과 태그는 그대로고, 일부 태그 색만 바뀔 수 있어요\n` +
+                `· 중간에 앱을 닫아도 태그 관리에서 이어서 할 수 있어요\n\n진행할까요?`,
+            )
+          ) {
+            await runTagRebuild(names);
+          }
+          return;
+        }
+        showToast("태그 삭제 실패: " + (msg.slice(0, 80) || "연결 오류"));
       }
       setBusy(null);
       loadNotionTagOptions();
     },
-    [notionFetch, showToast, loadNotionTagOptions, tmSelectedTag],
+    [notionFetch, showToast, loadNotionTagOptions, tmSelectedTag, words, runTagRebuild],
   );
 
   // 태그 관리를 열 때 노션 태그 옵션 목록 받아오기
@@ -2568,6 +2654,20 @@ export default function VocabApp() {
                 </div>
               )}
             </div>
+            {notionTagRebuilding && (
+              <div className="tm-panel" style={{ margin: "8px 0" }}>
+                <div className="tm-panel-hint">태그 정리가 중간에 멈춰 있어요.</div>
+                <div className="tm-panel-row">
+                  <button
+                    className="btn btn-primary"
+                    disabled={!!busy}
+                    onClick={() => runTagRebuild([])}
+                  >
+                    이어서 하기
+                  </button>
+                </div>
+              </div>
+            )}
             {unusedTags.length > 0 && (
               <>
                 <div className="tm-section-title tm-unused-title">
@@ -3159,9 +3259,8 @@ export default function VocabApp() {
                   ))}
                 </div>
                 <div className="modal-desc" style={{ fontSize: 12 }}>
-                  노션 API는 태그 옵션을 한 번에 100개까지만 다룰 수 있어서 앱에서 지울 수 없어요.
-                  노션 단어장 DB에서 tags 속성 이름 → 속성 편집 → 옵션 옆 ⋯ → 삭제로 지워 주세요.
                   어떤 단어에도 쓰이지 않는 옵션이라 지워도 단어는 바뀌지 않아요.
+                  태그 관리에서 하나씩 지우거나, 아래 버튼으로 한 번에 지울 수 있어요.
                 </div>
               </>
             )}
@@ -3177,6 +3276,19 @@ export default function VocabApp() {
                   }}
                 >
                   목록 복사
+                </button>
+              )}
+              {tagAudit.unused.length > 0 && (
+                <button
+                  className="btn btn-outline btn-danger"
+                  disabled={!!busy}
+                  onClick={() => {
+                    const names = tagAudit.unused;
+                    setTagAudit(null);
+                    deleteUnusedTags(names);
+                  }}
+                >
+                  모두 지우기
                 </button>
               )}
               <div style={{ flex: 1 }} />
