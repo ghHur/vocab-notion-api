@@ -90,6 +90,7 @@ export default function VocabApp() {
   const [syncStatus, setSyncStatus] = useState("idle"); // idle | syncing | success | error
   const [syncProgress, setSyncProgress] = useState(null); // { done, total } 대량 업로드 진행률
   const uploadingRef = useRef(false);
+  const promotingRef = useRef(false);
   const [tagAudit, setTagAudit] = useState(null); // { unused, total, usedCount } 노션 태그 점검 결과
   const [busy, setBusy] = useState(null); // 진행 중인 작업 설명 (로딩 표시용)
   const [installPrompt, setInstallPrompt] = useState(null); // 앱 설치 안내 이벤트
@@ -483,6 +484,24 @@ export default function VocabApp() {
             }),
           );
           setSyncStatus("success");
+          // 노션 연결로 들어온 단어의 대기 태그를 진짜 태그로 옮기기 (뒤에서 조용히)
+          if (!promotingRef.current) {
+            promotingRef.current = true;
+            (async () => {
+              let total = 0;
+              try {
+                for (let i = 0; i < 100; i++) {
+                  const r = await notionFetch("/api/tags/promote", "POST", {});
+                  total += r.promoted || 0;
+                  if (!r.remaining || (r.promoted || 0) === 0) break;
+                }
+              } catch (e) {
+                console.warn("대기 태그 옮기기 실패:", e);
+              }
+              promotingRef.current = false;
+              if (total > 0) showToast(`새 태그를 노션에 반영했어요 (단어 ${total}개)`);
+            })();
+          }
           if (!silent) {
             if (plan.full) {
               showToast(
